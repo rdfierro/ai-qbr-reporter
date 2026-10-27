@@ -62,7 +62,7 @@ export class BedrockStack extends Stack {
         ],
       } as any,
       topicPolicyConfig: {
-        topics: [
+        topicsConfig: [
           {
             type: 'DENY',
             name: 'UnsupportedClaims',

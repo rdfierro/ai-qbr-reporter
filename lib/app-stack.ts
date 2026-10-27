@@ -55,7 +55,10 @@ export class AppStack extends Stack {
     const pythonLayer = new lambda.LayerVersion(this, 'PythonDependencies', {
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_11],
       description: 'Shared Python libraries for ai-qbr-reporter',
-      code: lambda.Code.fromAsset('layers/python311', {
+      // CI sets -c skipBundling=true to validate templates without Docker; deploys bundle normally.
+      code: this.node.tryGetContext('skipBundling') === 'true'
+        ? lambda.Code.fromAsset('layers/python311')
+        : lambda.Code.fromAsset('layers/python311', {
         bundling: {
           image: lambda.Runtime.PYTHON_3_11.bundlingImage,
           command: [
@@ -64,7 +67,7 @@ export class AppStack extends Stack {
             'python -m pip install -r requirements.txt -t /asset-output/python && cp requirements.txt /asset-output/python/requirements.txt',
           ],
         },
-      }),
+        }),
     });
 
     const baseLambdaEnv = {
@@ -95,7 +98,7 @@ export class AppStack extends Stack {
       BEDROCK_GUARDRAIL_PARAM: props.bedrock.guardrailIdParameter.parameterName,
     }, pythonLayer);
 
-    const pptxBuilderFunction = this.createLambda('PptxBuilderFn', 'app/lambdas/pptx_builder', baseLambdaEnv, pythonLayer);
+    const pptxBuilderFunction = this.createLambda('PptxBuilderFn', 'app/lambdas/whitepaper_builder', baseLambdaEnv, pythonLayer);
 
     const deliverFunction = this.createLambda('DeliverFn', 'app/lambdas/deliver', {
       ...baseLambdaEnv,

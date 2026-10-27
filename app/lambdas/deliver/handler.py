@@ -22,10 +22,11 @@ SQS_CLIENT = boto3.client('sqs')
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
-    pptx_ref = event.get('pptx')
+    # The builder step returns the document under 'whitepaper'; 'pptx' is the older name.
+    pptx_ref = event.get('whitepaper') or event.get('pptx')
     narrative_data = event.get('narrative')
     if not pptx_ref or not narrative_data:
-        raise ValueError('PPTX and narrative data required for delivery stage')
+        raise ValueError('Whitepaper and narrative data required for delivery stage')
 
     narrative = NarrativeResponse(**narrative_data)
     recipients = event.get('recipients') or [os.environ['SENDER_EMAIL']]
@@ -75,7 +76,7 @@ def _send_email(recipients: List[str], subject: str, summary: str, pptx_ref: Dic
             'Subject': {'Data': subject, 'Charset': 'UTF-8'},
             'Body': {
                 'Text': {
-                    'Data': f"Summary:\n{summary}\n\nDeck: s3://{pptx_ref['bucket']}/{pptx_ref['key']}",
+                    'Data': f"Summary:\n{summary}\n\nDocument: s3://{pptx_ref['bucket']}/{pptx_ref['key']}",
                     'Charset': 'UTF-8',
                 }
             },

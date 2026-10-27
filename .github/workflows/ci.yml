@@ -40,4 +40,4 @@ jobs:
         working-directory: app/tests
 
       - name: CDK synth
-        run: npx cdk synth
+        run: npx cdk synth --quiet -c skipBundling=true

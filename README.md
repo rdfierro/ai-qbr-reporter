@@ -19,7 +19,9 @@ Infrastructure is defined twice, in AWS CDK (TypeScript) and in a standalone SAM
 
 ## Status
 
-Hackathon prototype. Unit tests pass and the CDK app compiles; it has not been run in production. Packaging Lambdas that share the `common` module needs work before a SAM deploy.
+Hackathon prototype. CI runs the unit tests, compiles the CDK app, and synthesizes all five CloudFormation stacks. It has not been deployed to production. Packaging Lambdas that share the `common` module needs work before a deploy.
+
+CI synthesizes with `-c skipBundling=true` so it doesn't need Docker; a normal `cdk synth` or `cdk deploy` bundles the Python layer as usual.
 
 ```bash
 pip install -r layers/python311/requirements.txt -r app/tests/requirements-test.txt
