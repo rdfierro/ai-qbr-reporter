@@ -1,6 +1,7 @@
 boto3
 botocore
 python-pptx
+python-docx
 matplotlib
 pydantic
 jinja2
