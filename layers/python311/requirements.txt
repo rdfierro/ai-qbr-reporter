@@ -1,0 +1,7 @@
+boto3
+botocore
+python-pptx
+matplotlib
+pydantic
+jinja2
+pillow

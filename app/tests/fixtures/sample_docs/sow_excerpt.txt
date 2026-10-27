@@ -1,0 +1,4 @@
+Our customer success charter prioritizes:
+- Reducing time-to-value for enterprise onboarding
+- Expanding product adoption in core modules
+- Delivering executive-ready insights with source attribution

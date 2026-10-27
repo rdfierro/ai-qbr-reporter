@@ -1,0 +1,14 @@
+{
+  "kpis": {},
+  "audience": "",
+  "goals": [],
+  "risks": [],
+  "period": "",
+  "writing_requirements": [
+    "Produce a JSON payload with keys slides (array) and citations (array).",
+    "Each slide requires a title and up to three concise bullets aligned to the provided audience.",
+    "Reference KPI metrics verbatim; do not invent numbers.",
+    "If data is missing, state 'insufficient data'.",
+    "Incorporate relevant knowledge base citations when supporting qualitative statements."
+  ]
+}

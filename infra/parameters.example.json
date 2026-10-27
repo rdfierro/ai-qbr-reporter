@@ -1,0 +1,11 @@
+{
+  "region": "us-west-2",
+  "useRedshift": false,
+  "bedrockModelId": "anthropic.claude-3-sonnet-20240229-v1:0",
+  "artifactsBucketPrefix": "artifacts",
+  "allowedSenderEmails": ["exec@example.com"],
+  "allowedSlackWebhook": "",
+  "monthlySchedule": "cron(0 15 1 * ? *)",
+  "quarterlySchedule": "cron(0 15 1 1,4,7,10 ? *)",
+  "pptxTimezone": "America/Los_Angeles"
+}

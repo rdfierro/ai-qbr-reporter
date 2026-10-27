@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Use Node.js 18
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: TypeScript build
+        run: npm run build
+
+      - name: Install Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies for tests
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r layers/python311/requirements.txt
+          pip install -r app/tests/requirements-test.txt
+
+      - name: Run unit tests
+        run: pytest
+        working-directory: app/tests
+
+      - name: CDK synth
+        run: npx cdk synth

@@ -1,0 +1,25 @@
+{
+  "period": "2024-Q2",
+  "coverage": {
+    "pipeline": 2.4,
+    "target": 3.0
+  },
+  "conversion": {
+    "mql_to_sql": 0.35,
+    "sql_to_win": 0.22
+  },
+  "revenue": {
+    "arr": 1250000,
+    "new": 320000,
+    "churn": 45000
+  },
+  "support": {
+    "csat": 4.3,
+    "sla_breaches": 2
+  },
+  "adoption": {
+    "wau": 18000,
+    "feature_x_usage_pct": 0.58
+  },
+  "generated_at": "2024-07-01T00:00:00Z"
+}

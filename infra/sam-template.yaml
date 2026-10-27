@@ -1,0 +1,845 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  AI QBR Reporter serverless infrastructure packaged with AWS SAM for Lambda-first deployments.
+
+Parameters:
+  BedrockModelId:
+    Type: String
+    Description: Bedrock model identifier used for narrative generation (for example anthropic.claude-3-sonnet-20240229-v1:0).
+  SenderEmail:
+    Type: String
+    Default: exec@example.com
+    Description: Verified SES sender email address used as the default pipeline sender.
+  AllowedSenderEmails:
+    Type: CommaDelimitedList
+    Default: exec@example.com
+    Description: Comma-separated list of email addresses permitted in SES send policies.
+  MonthlySchedule:
+    Type: String
+    Default: 'cron(0 15 1 * ? *)'
+    Description: EventBridge schedule expression for monthly pipeline runs.
+  QuarterlySchedule:
+    Type: String
+    Default: 'cron(0 15 1 1,4,7,10 ? *)'
+    Description: EventBridge schedule expression for quarterly pipeline runs.
+  SlackWebhookSecretArn:
+    Type: String
+    Default: ''
+    Description: Optional Secrets Manager ARN holding the Slack webhook URL for pipeline notifications.
+
+Conditions:
+  HasSlackWebhookSecret: !Not [!Equals [!Ref SlackWebhookSecretArn, '']]
+
+Globals:
+  Function:
+    Runtime: python3.11
+    Handler: handler.lambda_handler
+    Timeout: 180
+    MemorySize: 1024
+    Tracing: Active
+    Layers:
+      - !Ref PythonDependenciesLayer
+    Environment:
+      Variables:
+        ARTIFACTS_BUCKET: !Ref ArtifactsBucket
+        CURATED_BUCKET: !Ref CuratedBucket
+        RAW_BUCKET: !Ref RawBucket
+        KMS_KEY_ARN: !GetAtt DataLakeKey.Arn
+        LOG_LEVEL: INFO
+        MASK_PII: 'true'
+
+Resources:
+  DataLakeKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS CMK for ai-qbr-reporter data lake encryption
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Id: key-default-1
+        Statement:
+          - Sid: EnableRootAccount
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+            Action: 'kms:*'
+            Resource: '*'
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  DataLakeKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: alias/ai-qbr-reporter/datalake
+      TargetKeyId: !Ref DataLakeKey
+
+  RawBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref DataLakeKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: IntelligentTiering
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 30
+            NoncurrentVersionTransitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 60
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  CuratedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref DataLakeKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: IntelligentTiering
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 30
+            NoncurrentVersionTransitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 60
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  ArtifactsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref DataLakeKey
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: IntelligentTiering
+            Status: Enabled
+            Transitions:
+              - StorageClass: INTELLIGENT_TIERING
+                TransitionInDays: 30
+            NoncurrentVersionTransitions:
+              - StorageClass: GLACIER_IR
+                TransitionInDays: 60
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+
+  ArtifactsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactsBucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AllowAthenaAccess
+            Effect: Allow
+            Principal:
+              Service: athena.amazonaws.com
+            Action:
+              - s3:GetObject
+              - s3:PutObject
+            Resource: !Sub ${ArtifactsBucket.Arn}/athena/*
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+          - Sid: AllowAthenaList
+            Effect: Allow
+            Principal:
+              Service: athena.amazonaws.com
+            Action: s3:ListBucket
+            Resource: !GetAtt ArtifactsBucket.Arn
+            Condition:
+              StringLike:
+                s3:prefix: athena/*
+
+  GlueDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      CatalogId: !Ref AWS::AccountId
+      DatabaseInput:
+        Name: ai_qbr_curated
+
+  GlueCrawlerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: glue.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSGlueServiceRole
+      Policies:
+        - PolicyName: GlueS3Access
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt CuratedBucket.Arn
+                  - !Sub ${CuratedBucket.Arn}/*
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt DataLakeKey.Arn
+
+  CuratedCrawler:
+    Type: AWS::Glue::Crawler
+    Properties:
+      Name: ai-qbr-curated-crawler
+      Role: !GetAtt GlueCrawlerRole.Arn
+      DatabaseName: !Ref GlueDatabase
+      Targets:
+        S3Targets:
+          - Path: !Sub s3://${CuratedBucket}/
+
+  AthenaWorkgroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: ai_qbr_reporting_wg
+      State: ENABLED
+      WorkGroupConfiguration:
+        EnforceWorkGroupConfiguration: true
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub s3://${ArtifactsBucket}/athena/
+          EncryptionConfiguration:
+            EncryptionOption: SSE_KMS
+            KmsKey: !GetAtt DataLakeKey.Arn
+    DeletionProtectionEnabled: false
+
+  AthenaWorkgroupParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ai-qbr/analytics/athena/workgroup
+      Type: String
+      Value: !Ref AthenaWorkgroup
+      Description: Athena workgroup used for KPI queries.
+
+  AthenaOutputParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ai-qbr/analytics/athena/output
+      Type: String
+      Value: !Sub s3://${ArtifactsBucket}/athena/
+      Description: S3 output location for Athena query results.
+
+  BedrockKnowledgeBaseRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: bedrock.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KnowledgeBaseAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: AllowReadCuratedDocs
+                Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt CuratedBucket.Arn
+                  - !Sub ${CuratedBucket.Arn}/bedrock/kb-docs/*
+              - Sid: AllowDecrypt
+                Effect: Allow
+                Action:
+                  - kms:Decrypt
+                  - kms:DescribeKey
+                Resource: !GetAtt DataLakeKey.Arn
+
+  BedrockGuardrail:
+    Type: AWS::Bedrock::Guardrail
+    Properties:
+      Name: ai-qbr-guardrail
+      Description: Guardrail protecting QBR narratives from disallowed or PII content.
+      BlockedInputMessaging: Please provide only KPI-aligned inputs.
+      BlockedOutputsMessaging: Content removed to comply with policy.
+      SensitiveInformationPolicyConfig:
+        PiiEntitiesConfig:
+          - Type: EMAIL
+            Action: REDACT
+          - Type: PHONE
+            Action: REDACT
+      TopicPolicyConfig:
+        Topics:
+          - Type: DENY
+            Name: UnsupportedClaims
+            Definition: Avoid speculative revenue or pipeline claims not provided in KPIs.
+      WordPolicyConfig:
+        WordsConfig:
+          - Text: guaranteed win
+            Action: BLOCK
+
+  BedrockKnowledgeBase:
+    Type: AWS::Bedrock::KnowledgeBase
+    Properties:
+      Name: ai-qbr-knowledge-base
+      Description: Bedrock-managed knowledge base indexing curated QBR collateral.
+      RoleArn: !GetAtt BedrockKnowledgeBaseRole.Arn
+      KnowledgeBaseConfiguration:
+        Type: VECTOR
+        VectorKnowledgeBaseConfiguration:
+          EmbeddingModelArn: arn:aws:bedrock:us-west-2::foundation-model/amazon.titan-embed-text-v2:0
+      StorageConfiguration:
+        Type: BEDROCK_MANAGED
+        BedrockManagedConfiguration:
+          KmsKeyArn: !GetAtt DataLakeKey.Arn
+
+  BedrockDataSource:
+    Type: AWS::Bedrock::DataSource
+    Properties:
+      KnowledgeBaseId: !GetAtt BedrockKnowledgeBase.KnowledgeBaseId
+      Name: curated-docs-source
+      DataSourceConfiguration:
+        Type: S3
+        S3Configuration:
+          BucketArn: !GetAtt CuratedBucket.Arn
+          InclusionPrefixes:
+            - bedrock/kb-docs/
+
+  BedrockModelIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ai-qbr/bedrock/model-id
+      Type: String
+      Value: !Ref BedrockModelId
+      Description: Bedrock model id used for retrieve and generate.
+
+  BedrockKnowledgeBaseIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ai-qbr/bedrock/knowledge-base-id
+      Type: String
+      Value: !GetAtt BedrockKnowledgeBase.KnowledgeBaseId
+      Description: Knowledge base id shared with the narrative Lambda.
+
+  BedrockGuardrailIdParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ai-qbr/bedrock/guardrail-id
+      Type: String
+      Value: !GetAtt BedrockGuardrail.GuardrailId
+      Description: Guardrail id enforced at runtime.
+
+  EmailFailureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${AWS::StackName}-email-dlq
+      MessageRetentionPeriod: 1209600
+      VisibilityTimeout: 60
+      SqsManagedSseEnabled: true
+
+  SenderEmailIdentity:
+    Type: AWS::SES::EmailIdentity
+    Properties:
+      EmailIdentity: !Ref SenderEmail
+
+  PythonDependenciesLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: ai-qbr-python-deps
+      Description: Shared Python dependencies for ai-qbr-reporter Lambdas.
+      ContentUri: ../layers/python311
+      CompatibleRuntimes:
+        - python3.11
+      RetentionPolicy: Retain
+    Metadata:
+      BuildMethod: pythondefault
+
+  KpiQueryFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-kpi-query
+      CodeUri: ../app/lambdas/kpi_query
+      Environment:
+        Variables:
+          USE_REDSHIFT: 'false'
+          ATHENA_WORKGROUP_PARAM: !Ref AthenaWorkgroupParameter
+          ATHENA_OUTPUT_PARAM: !Ref AthenaOutputParameter
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactsBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:Encrypt
+                - kms:GenerateDataKey*
+                - kms:DescribeKey
+              Resource: !GetAtt DataLakeKey.Arn
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AthenaWorkgroupParameter}
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${AthenaOutputParameter}
+            - Effect: Allow
+              Action:
+                - athena:StartQueryExecution
+                - athena:GetQueryExecution
+                - athena:GetQueryResults
+              Resource: '*'
+            - Effect: Allow
+              Action:
+                - redshift-data:ExecuteStatement
+                - redshift-data:DescribeStatement
+                - redshift-data:GetStatementResult
+              Resource: '*'
+
+  ChartRenderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-chart-render
+      CodeUri: ../app/lambdas/chart_render
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactsBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:Encrypt
+                - kms:GenerateDataKey*
+                - kms:DescribeKey
+              Resource: !GetAtt DataLakeKey.Arn
+
+  NarrativeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-narrative
+      CodeUri: ../app/lambdas/narrative
+      Environment:
+        Variables:
+          BEDROCK_MODEL_PARAM: !Ref BedrockModelIdParameter
+          BEDROCK_KB_PARAM: !Ref BedrockKnowledgeBaseIdParameter
+          BEDROCK_GUARDRAIL_PARAM: !Ref BedrockGuardrailIdParameter
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref CuratedBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ssm:GetParameter
+              Resource:
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BedrockModelIdParameter}
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BedrockKnowledgeBaseIdParameter}
+                - !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter${BedrockGuardrailIdParameter}
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+                - bedrock:Retrieve
+                - bedrock:RetrieveAndGenerate
+              Resource: '*'
+
+  WhitepaperBuilderFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-whitepaper-builder
+      CodeUri: ../app/lambdas/whitepaper_builder
+      Policies:
+        - S3CrudPolicy:
+            BucketName: !Ref ArtifactsBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:Encrypt
+                - kms:GenerateDataKey*
+                - kms:DescribeKey
+              Resource: !GetAtt DataLakeKey.Arn
+
+  DeliverFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-deliver
+      CodeUri: ../app/lambdas/deliver
+      Environment:
+        Variables:
+          SENDER_EMAIL: !Ref SenderEmail
+          ALLOWED_SENDERS: !Join [",", !Ref AllowedSenderEmails]
+          SLACK_WEBHOOK_SECRET_ARN: !Ref SlackWebhookSecretArn
+          EMAIL_DLQ_URL: !Ref EmailFailureQueue
+      Policies:
+        - S3ReadPolicy:
+            BucketName: !Ref ArtifactsBucket
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - kms:Decrypt
+                - kms:DescribeKey
+              Resource: !GetAtt DataLakeKey.Arn
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+              Resource: !Sub ${ArtifactsBucket.Arn}/*
+            - Effect: Allow
+              Action:
+                - s3:PutObject
+              Resource: !Sub ${ArtifactsBucket.Arn}/artifacts/emails/*
+            - Effect: Allow
+              Action:
+                - sqs:SendMessage
+              Resource: !GetAtt EmailFailureQueue.Arn
+            - Effect: Allow
+              Action:
+                - ses:SendEmail
+                - ses:SendRawEmail
+              Resource: !Sub arn:aws:ses:${AWS::Region}:${AWS::AccountId}:identity/${SenderEmail}
+              Condition:
+                StringLikeIfExists:
+                  ses:FromAddress: !Ref AllowedSenderEmails
+        - !If
+          - HasSlackWebhookSecret
+          - Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                Resource: !Ref SlackWebhookSecretArn
+          - !Ref AWS::NoValue
+
+  PipelineFailureTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: AI QBR Reporter Pipeline Failures
+      TopicName: !Sub ${AWS::StackName}-pipeline-failures
+
+  PipelineLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/states/${AWS::StackName}-ai-qbr-pipeline
+      RetentionInDays: 30
+
+  PipelineStateMachine:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      Name: !Sub ${AWS::StackName}-ai-qbr-reporter
+      Tracing:
+        Enabled: true
+      Logging:
+        Destinations:
+          - CloudWatchLogsLogGroup:
+              LogGroupArn: !GetAtt PipelineLogGroup.Arn
+        IncludeExecutionData: true
+        Level: ALL
+      DefinitionSubstitutions:
+        KpiQueryArn: !GetAtt KpiQueryFunction.Arn
+        ChartRenderArn: !GetAtt ChartRenderFunction.Arn
+        NarrativeArn: !GetAtt NarrativeFunction.Arn
+        WhitepaperArn: !GetAtt WhitepaperBuilderFunction.Arn
+        DeliverArn: !GetAtt DeliverFunction.Arn
+        FailureTopicArn: !Ref PipelineFailureTopic
+      DefinitionBody:
+        StartAt: KPI_QUERY
+        States:
+          KPI_QUERY:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${KpiQueryArn}
+              Payload.$: $
+            OutputPath: $.Payload
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: CHART_RENDER
+          CHART_RENDER:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${ChartRenderArn}
+              Payload.$: $
+            OutputPath: $.Payload
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: NARRATIVE
+          NARRATIVE:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${NarrativeArn}
+              Payload.$: $
+            OutputPath: $.Payload
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: WHITEPAPER
+          WHITEPAPER:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${WhitepaperArn}
+              Payload.$: $
+            OutputPath: $.Payload
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: DELIVER
+          DELIVER:
+            Type: Task
+            Resource: arn:aws:states:::lambda:invoke
+            Parameters:
+              FunctionName: ${DeliverArn}
+              Payload.$: $
+            OutputPath: $.Payload
+            Retry:
+              - ErrorEquals:
+                  - States.ALL
+                IntervalSeconds: 10
+                MaxAttempts: 2
+                BackoffRate: 2
+            Catch:
+              - ErrorEquals:
+                  - States.ALL
+                ResultPath: $.error
+                Next: NotifyFailure
+            Next: PipelineSucceeded
+          NotifyFailure:
+            Type: Task
+            Resource: arn:aws:states:::sns:publish
+            Parameters:
+              TopicArn: ${FailureTopicArn}
+              Message.$: $
+              Subject: AI QBR Reporter pipeline failure
+            Next: PipelineFailed
+          PipelineFailed:
+            Type: Fail
+          PipelineSucceeded:
+            Type: Succeed
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref KpiQueryFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref ChartRenderFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref NarrativeFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WhitepaperBuilderFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref DeliverFunction
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref PipelineFailureTopic
+            - Effect: Allow
+              Action:
+                - logs:CreateLogDelivery
+                - logs:GetLogDelivery
+                - logs:UpdateLogDelivery
+                - logs:DeleteLogDelivery
+                - logs:ListLogDeliveries
+                - logs:DescribeLogGroups
+                - logs:PutLogEvents
+              Resource: '*'
+
+  EventsInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: StartPipelineExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref PipelineStateMachine
+
+  MonthlyScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Monthly execution trigger for the AI QBR pipeline.
+      ScheduleExpression: !Ref MonthlySchedule
+      State: ENABLED
+      Targets:
+        - Arn: !Ref PipelineStateMachine
+          Id: MonthlyPipeline
+          RoleArn: !GetAtt EventsInvokeRole.Arn
+
+  QuarterlyScheduleRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Quarterly execution trigger for the AI QBR pipeline.
+      ScheduleExpression: !Ref QuarterlySchedule
+      State: ENABLED
+      Targets:
+        - Arn: !Ref PipelineStateMachine
+          Id: QuarterlyPipeline
+          RoleArn: !GetAtt EventsInvokeRole.Arn
+
+  ApiInvokeRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: apigateway.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: ApiStartExecution
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - states:StartExecution
+                Resource: !Ref PipelineStateMachine
+
+  PipelineApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: ai-qbr-reporter-api
+      StageName: prod
+      TracingEnabled: true
+      MethodSettings:
+        - LoggingLevel: INFO
+          MetricsEnabled: true
+          DataTraceEnabled: false
+          ResourcePath: '/*'
+          HttpMethod: '*'
+      DefinitionBody:
+        Fn::Sub:
+          - |
+            openapi: 3.0.1
+            info:
+              title: ai-qbr-reporter-api
+              version: '1.0'
+            paths:
+              /run:
+                post:
+                  responses:
+                    '202':
+                      description: Accepted
+                  x-amazon-apigateway-integration:
+                    type: aws
+                    httpMethod: POST
+                    uri: arn:aws:apigateway:${AWS::Region}:states:action/StartExecution
+                    credentials: ${ApiRoleArn}
+                    requestTemplates:
+                      application/json: |
+                        {"input": "$util.escapeJavaScript($input.body)", "stateMachineArn": "${StateMachineArn}"}
+                    responses:
+                      default:
+                        statusCode: '202'
+          - ApiRoleArn: !GetAtt ApiInvokeRole.Arn
+            StateMachineArn: !Ref PipelineStateMachine
+
+Outputs:
+  ApiUrl:
+    Description: Invoke URL for the ai-qbr-reporter API.
+    Value: !GetAtt PipelineApi.ApiEndpoint
+  StateMachineArn:
+    Description: ARN of the orchestrating Step Functions state machine.
+    Value: !Ref PipelineStateMachine
+  RawBucketName:
+    Description: S3 bucket storing raw inputs.
+    Value: !Ref RawBucket
+  CuratedBucketName:
+    Description: S3 bucket storing curated datasets.
+    Value: !Ref CuratedBucket
+  ArtifactsBucketName:
+    Description: S3 bucket storing generated artifacts.
+    Value: !Ref ArtifactsBucket
+  DataLakeKeyArn:
+    Description: KMS key ARN securing S3 artifacts.
+    Value: !GetAtt DataLakeKey.Arn
+  FailureTopicArn:
+    Description: SNS topic ARN for pipeline failure alerts.
+    Value: !Ref PipelineFailureTopic

@@ -1,0 +1,4 @@
+pytest
+pytest-mock
+moto[s3,ssm,secretsmanager,sqs]
+Pillow

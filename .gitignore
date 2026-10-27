@@ -1,0 +1,23 @@
+# Node / TypeScript
+node_modules/
+dist/
+cdk.out/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Project artifacts
+infra/parameters.json
+artifacts/
+app/tests/.pytest_cache/
+coverage/
+
+# OS
+Thumbs.db
